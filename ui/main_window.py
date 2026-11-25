@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.analysis import NOTES
+from core.device import detect_device
 from ui.appearance import system_prefers_dark
 from ui.frameless import EdgeResizer
 from ui.player_panel import PlayerPanel
@@ -75,6 +76,8 @@ class DropZone(QFrame):
 
 
 class MainWindow(QMainWindow):
+    device_detected = Signal(str)
+
     def __init__(self, output_base: Path | None = None, device: str | None = None):
         super().__init__()
         self.setWindowTitle("Wihok")  # still used by the taskbar even though the title bar is our own
@@ -89,13 +92,20 @@ class MainWindow(QMainWindow):
         self.theme_name = saved_theme if saved_theme in PALETTES else ("dark" if system_prefers_dark() else "light")
         music = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.MusicLocation)
         self.output_base = Path(output_base) if output_base else Path(music) / "Wihok"
-        self.device = device or _default_device()
+        # The GPU check takes a few seconds (a child process imports PyTorch), so it runs in the background.
+        self.device = device
+        self._detected_device: str | None = None
+        self._device_thread: threading.Thread | None = None
+        self.device_detected.connect(self._on_device_detected)
 
         self._worker: ProcessWorker | None = None
         self._cancel = threading.Event()
         self._song: Path | None = None
         self._done = None
         self._status = ("cpu_mode" if self.device == "cpu" else "ready", "normal", {})
+        if self.device is None:
+            self._device_thread = threading.Thread(target=self._detect_device, daemon=True)
+            self._device_thread.start()
 
         self._build()
         self._apply_theme(self.theme_name)
@@ -329,7 +339,7 @@ class MainWindow(QMainWindow):
         self.results.hide()
         self.player.clear()
         self._cancel = threading.Event()
-        worker = ProcessWorker(song, self.output_base, device or self.device, self._cancel, self)
+        worker = ProcessWorker(song, self.output_base, device or self._resolve_device(), self._cancel, self)
         worker.stage.connect(self._on_stage)
         worker.notice.connect(lambda: self._set_status("retry_notice"))
         worker.succeeded.connect(self._on_succeeded)
@@ -342,6 +352,28 @@ class MainWindow(QMainWindow):
         self._set_status("separating")
         worker.start()
         self._update_controls()
+
+    def _detect_device(self):
+        self._detected_device = detect_device()
+        try:
+            self.device_detected.emit(self._detected_device)
+        except RuntimeError:  # the window was closed before the check finished
+            pass
+
+    def _on_device_detected(self, device: str):
+        if self.device is not None:
+            return
+        self.device = device
+        if device == "cpu" and self._status[0] == "ready":
+            self._set_status("cpu_mode")
+
+    def _resolve_device(self) -> str:
+        """The device to use now; waits for the background check if a song arrives before it finishes."""
+        if self.device is None:
+            if self._device_thread is not None:
+                self._device_thread.join()
+            self.device = self._detected_device or "cpu"
+        return self.device
 
     def _cancel_clicked(self):
         self._cancel.set()
@@ -427,8 +459,3 @@ class MainWindow(QMainWindow):
             self._cancel.set()
             self._worker.wait(15000)
         super().closeEvent(event)
-
-
-def _default_device() -> str:
-    import torch
-    return "cuda" if torch.cuda.is_available() else "cpu"

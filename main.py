@@ -61,6 +61,9 @@ def run_selftest(report_path: str) -> int:
 def main() -> int:
     if len(sys.argv) > 1 and sys.argv[1] == "--demucs":
         return run_demucs_worker(sys.argv[2:])
+    if len(sys.argv) > 1 and sys.argv[1] == "--cuda-check":
+        from core.device import cuda_check_main
+        return cuda_check_main()
     if len(sys.argv) > 2 and sys.argv[1] == "--selftest":
         return run_selftest(sys.argv[2])
     if sys.platform == "win32":
